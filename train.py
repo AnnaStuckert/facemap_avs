@@ -11,9 +11,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 import torchvision.transforms as transforms
-from torchvision.transforms import functional as TF
 from numpy import random
 from torch.utils.data import DataLoader, Dataset, SubsetRandomSampler, TensorDataset
+from torchvision.transforms import functional as TF
 
 torch.manual_seed(42)
 np.random.seed(42)
@@ -34,15 +34,28 @@ class facemapdataset(Dataset):
         return len(self.targets)
 
     def __getitem__(self, index):
-        image, label = self.data[index], self.targets[index]
+        image, label = self.data[index].clone(), self.targets[index].clone()
+        if self.transform == "1KP":
+            # Keep only the last two elements of label
+            label = label[-2:]
 
-        if index % 2 == 1 and self.transform == 'flip':
+        elif self.transform == "2KP":
+            # label = label[:2] + label[-2:]
+            # print(label.shape)
+            label = torch.cat((label[:2], label[-2:]))
+            # label = torch.cat((label[:, :2], label[:, -2:]), dim=1)
+            # print(label)
+
+        elif index % 2 == 1 and self.transform == "flip":
             image = image.flip([2])  # Flip the image horizontally
-            label[::2] = 224 - label[::2]  # Adjust x-coordinates for flipped label positions
+            label[::2] = (
+                224 - label[::2]
+            )  # Adjust x-coordinates for flipped label positions
 
-        elif index % 2 == 1 and self.transform == 'rotate':
-        #elif self.transform == 'rotate':
+        elif self.transform == "2KP-rotate":
+            # elif self.transform == 'rotate':
             # Set a random rotation angle
+            label = torch.cat((label[:2], label[-2:]))
             angle_image = 15  # Clockwise rotation for the image
             angle_label = -15  # Counterclockwise rotation for the labels
 
@@ -58,40 +71,51 @@ class facemapdataset(Dataset):
             # Apply opposite rotation transformation to each (x, y) coordinate for the labels
             label = label.clone()
             x_coords, y_coords = label[::2] - cx, label[1::2] - cy  # Shift to origin
-            new_x_coords = x_coords * torch.cos(angle_label_rad) - y_coords * torch.sin(angle_label_rad)
-            new_y_coords = x_coords * torch.sin(angle_label_rad) + y_coords * torch.cos(angle_label_rad)
+            new_x_coords = x_coords * torch.cos(angle_label_rad) - y_coords * torch.sin(
+                angle_label_rad
+            )
+            new_y_coords = x_coords * torch.sin(angle_label_rad) + y_coords * torch.cos(
+                angle_label_rad
+            )
             label[::2] = new_x_coords + cx  # Shift back
             label[1::2] = new_y_coords + cy
 
         # Plotting the image and labels
-        #plt.imshow(image.permute(1, 2, 0).numpy())  # Convert to (H, W, C) for plotting
-        #plt.scatter(label[::2].numpy(), label[1::2].numpy(), c='red', marker='x')  # Plot labels as red 'x'
-        #plt.title("Image with Rotated Labels")
-        #plt.axis('off')  # Hide axes for a cleaner plot
-        #plt.show()
+        # plt.imshow(image.permute(1, 2, 0).numpy())  # Convert to (H, W, C) for plotting
+        # plt.scatter(label[::2].numpy(), label[1::2].numpy(), c='red', marker='x')  # Plot labels as red 'x'
+        # plt.title("Image with Rotated Labels")
+        # plt.axis('off')  # Hide axes for a cleaner plot
+        # plt.show()
 
         return image, label
 
+
 # Plot all images and corresponding labels in the dataset
-def plot_all_images_with_labels(dataset):
-    for i in range(len(dataset)):
-        # Retrieve the image and label pair
-        image, label = dataset[i]
+# def plot_all_images_with_labels(dataset):
+#     for i in range(len(dataset)):
+#         # Retrieve the image and label pair
+#         image, label = dataset[i]
 
-        # Plot the image
-        plt.figure(figsize=(4, 4))
-        plt.imshow(image.permute(1, 2, 0).cpu().numpy(), cmap="gray")  # (H, W, C) for plotting
-        plt.scatter(label[::2].cpu().numpy(), label[1::2].cpu().numpy(), c="red", marker="x")
-        
-        # Title and formatting
-        plt.title(f"Image {i+1} with Labels")
-        plt.axis("off")  # Hide axes for a cleaner plot
+#         # Plot the image
+#         plt.figure(figsize=(4, 4))
+#         plt.imshow(
+#             image.permute(1, 2, 0).cpu().numpy(), cmap="gray"
+#         )  # (H, W, C) for plotting
+#         plt.scatter(
+#             label[::2].cpu().numpy(), label[1::2].cpu().numpy(), c="red", marker="x"
+#         )
 
-        plt.show()
+#         # Title and formatting
+#         plt.title(f"Image {i+1} with Labels")
+#         plt.axis("off")  # Hide axes for a cleaner plot
+
+#         plt.show()
+
 
 ### Make dataset
-dataset = facemapdataset(transform='rotate')
-#dataset = facemapdataset(transform='flip')  # (transform='flip')
+# dataset = facemapdatasettransform = 'rotate)'
+dataset = facemapdataset(transform="flip")  # (transform='flip')
+# dataset = facemapdataset(transform = '2KP-rotate')
 
 
 x = dataset[0][0]
@@ -153,11 +177,11 @@ num_output_classes = 24  # Change this to the desired number of output classes
 
 
 model = timm.create_model(
-    "vit_base_patch8_224",
+    "vit_base_patch16_224",
     pretrained=True,
     in_chans=1,
     num_classes=num_output_classes,
-    patch_size=224,
+    patch_size=16,
 )
 
 model = model.to(device)
@@ -167,17 +191,20 @@ print("Number of parameters:%d M" % (nParam / 1e6))
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 minLoss = 1e6
 convIter = 0
-patience = 1000
+patience = 100
 train_loss = []
 valid_loss = []
 
 for epoch in range(num_epochs):
     tr_loss = 0
     for i, (inputs, labels) in enumerate(loader_train):
+
         inputs = inputs.to(device)
         labels = labels.to(device)
         scores = F.softplus(model(inputs))
-        loss = loss_fun(torch.log(scores[labels!=0]), torch.log(F.softplus(labels[labels!=0])))
+        loss = loss_fun(
+            torch.log(scores[labels != 0]), torch.log(F.softplus(labels[labels != 0]))
+        )
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -195,7 +222,10 @@ for epoch in range(num_epochs):
             inputs = inputs.to(device)
             labels = labels.to(device)
             scores = F.softplus(model(inputs))
-            loss = loss_fun(torch.log(scores[labels!=0]), torch.log(F.softplus(labels[labels!=0])))
+            loss = loss_fun(
+                torch.log(scores[labels != 0]),
+                torch.log(F.softplus(labels[labels != 0])),
+            )
             val_loss += loss.item()
         val_loss = val_loss / (i + 1)
 
@@ -216,7 +246,6 @@ for epoch in range(num_epochs):
         plt.tight_layout()
         plt.savefig("logs/epoch_%03d.jpg" % epoch)
         plt.close()
-
 
         if minLoss > val_loss:
             convEpoch = epoch
@@ -247,7 +276,9 @@ with torch.no_grad():
         inputs = inputs.to(device)
         labels = labels.to(device)
         scores = F.softplus(model(inputs))
-        loss = loss_fun(torch.log(scores[labels!=0]), torch.log(F.softplus(labels[labels!=0])))
+        loss = loss_fun(
+            torch.log(scores[labels != 0]), torch.log(F.softplus(labels[labels != 0]))
+        )
         val_loss += loss.item()
 
         img = inputs.squeeze().detach().cpu().numpy()
